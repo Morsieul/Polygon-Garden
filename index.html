@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <!-- Mediapipe-->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <!-- Mediapipe-->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebXR Interactive 3D Scene</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            display: block;
+        }
+        #instructions {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            max-width: 300px;
+            z-index: 100;
+        }
+        #instructions h3 { margin-top: 0; }
+        #instructions p { margin: 5px 0; font-size: 14px; }
+        kbd {
+            background: #444; padding: 1px 5px;
+            border-radius: 3px; font-size: 11px;
+            border: 1px solid #666;
+        }
+        /* Hand position HUD */
+        #hand-hud {
+            position: absolute; right: 20px; bottom: 170px;
+            width: 120px; height: 120px;
+            background: rgba(0,0,0,0.45);
+            border-radius: 50%;
+            border: 2px solid rgba(255,255,255,0.35);
+            z-index: 100; pointer-events: none;
+            transition: border-color 0.2s;
+        }
+        #hand-dot {
+            position: absolute; width: 12px; height: 12px;
+            background: #888; border-radius: 50%;
+            transform: translate(-50%, -50%);
+            left: 50%; top: 50%;
+            transition: background 0.1s, box-shadow 0.1s;
+        }
+        /* Dead-zone ring: DEAD_ZONE=0.22 → ring diameter=44% of HUD */
+        #dz-ring {
+            position: absolute;
+            border: 1px dashed rgba(255,255,255,0.3);
+            border-radius: 50%;
+            width: 44%; height: 44%;
+            left: 28%; top: 28%;
+        }
+        #hud-label {
+            position: absolute; right: 20px; bottom: 152px;
+            color: rgba(255,255,255,0.6); font-size: 10px;
+            font-family: monospace; z-index: 100;
+            text-align: center; width: 120px;
+        }
+        /* Elements tagged as HUD get hidden together when HUD is toggled off */
+        .hud-toggleable {
+            transition: opacity 0.2s ease;
+        }
+        body.hud-hidden .hud-toggleable {
+            opacity: 0;
+            pointer-events: none;
+        }
+        #hud-toggle-btn {
+            position: absolute; top: 20px; right: 20px;
+            width: 40px; height: 40px;
+            background: rgba(0,0,0,0.7);
+            border: 1px solid rgba(255,255,255,0.35);
+            border-radius: 8px;
+            color: white; font-size: 18px;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; z-index: 200;
+            user-select: none;
+            transition: background 0.2s;
+        }
+        #hud-toggle-btn:hover { background: rgba(0,0,0,0.9); }
+    </style>
+</head>
+<body>
+    
+    <div id="hud-toggle-btn" title="Mostrar/Ocultar HUD (tecla H)">🐵</div>
+
+    <div id="instructions" class="hud-toggleable">
+        <h3>🎮 Controles</h3>
+        <p><strong>👁️ Câmera (Mão):</strong> Mova a mão para as bordas</p>
+        <p><strong>🎯 Precisão:</strong> Segure <kbd>Shift</kbd> para modo lento</p>
+        <p><strong>🖱️ Câmera (Mouse):</strong> Botão direito + arrastar</p>
+        <p><strong>Mover câmera:</strong> <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></p>
+        <p><strong>Zoom:</strong> Scroll do mouse</p>
+        <p><strong>Selecionar objeto:</strong> Clicar nele</p>
+        <p><strong>Escalar objeto:</strong> <kbd>E</kbd> / <kbd>R</kbd></p>
+        <p><strong>Pinçar:</strong> Junte polegar e indicador</p>
+    </div>
+    
+    
+
+    <video class="input_video" style="display:none;" playsinline></video>
+
+    <div id="loading" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.8);color:white;padding:20px;border-radius:8px;">
+        Loading camera...
+    </div>
+
+    <!-- Hand position HUD: shows wrist position vs dead-zone ring -->
+    <div id="hand-hud" class="hud-toggleable">
+        <div id="dz-ring"></div>
+        <div id="hand-dot"></div>
+    </div>
+    <div id="hud-label" class="hud-toggleable">Posição da Mão</div>
+
+    <div id="debug-panel" class="hud-toggleable" style="position:absolute;bottom:20px;left:20px;background:rgba(0,0,0,0.8);color:#00ff00;padding:15px;border-radius:8px;font-family:monospace;z-index:100;">
+        Aguardando mão...
+    </div>
+
+    <!--
+    =====================================================================
+    BUG 1 FIXED: Missing comma after "three/addons/" entry.
+    A JSON syntax error here kills the entire importmap, so NO modules
+    load at all and the scene is completely blank.
+    =====================================================================
+    -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "three-mesh-bvh": "https://unpkg.com/three-mesh-bvh@0.7.4/build/index.module.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { TransformControls } from 'three/addons/controls/TransformControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { MeshBVH } from 'three-mesh-bvh';
+        // OrbitControls removed — FPS camera is driven by hand + right-click mouse
+
+        // ============================================
+        // SECTION 1: SCENE SETUP
+        // ============================================
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+
+        const camera = new THREE.PerspectiveCamera(
+            75,
+            window.innerWidth / window.innerHeight,
+            0.1,
+            1000
+        );
+        camera.position.set(0, 2, 8);  // FPS eye-level, objects are ahead at z≈0
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        // ============================================
+        // SECTION 2: LIGHTING
+        // ============================================
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+        directionalLight.position.set(10, 20, 10);
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 2048;
+        directionalLight.shadow.mapSize.height = 2048;
+        scene.add(directionalLight);
+
+        // ============================================
+        // SECTION 3: FLOOR
+        // ============================================
+
+        const floorGeometry = new THREE.PlaneGeometry(50, 50, 50, 50);
+        const floorMaterial = new THREE.MeshStandardMaterial({
+            color: 0x228B22,
+            roughness: 0.8,
+            metalness: 0.1
+        });
+        const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+        floor.rotation.x = -Math.PI / 2;
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        const gridHelper = new THREE.GridHelper(50, 50, 0x000000, 0x000000);
+        gridHelper.material.opacity = 0.2;
+        gridHelper.material.transparent = true;
+        scene.add(gridHelper);
+
+        // ============================================
+        // SECTION 4: INTERACTIVE OBJECTS
+        // ============================================
+
+        const interactiveObjects = [];
+
+        // --- CUBE ---
+        const cube = new THREE.Mesh(
+            new THREE.BoxGeometry(1.5, 1.5, 1.5),
+            new THREE.MeshStandardMaterial({ color: 0xFF6B6B, roughness: 0.4, metalness: 0.6 })
+        );
+        cube.position.set(-3, 0.75, 0);
+        cube.castShadow = true;
+        cube.receiveShadow = true;
+        cube.userData = { name: 'Cube', originalScale: 1, shouldRotate: true };
+        scene.add(cube);
+        interactiveObjects.push(cube);
+
+        // --- SPHERE ---
+        const sphere = new THREE.Mesh(
+            new THREE.SphereGeometry(1, 32, 32),
+            new THREE.MeshStandardMaterial({ color: 0x4ECDC4, roughness: 0.3, metalness: 0.7 })
+        );
+        sphere.position.set(0, 1, 0);
+        sphere.castShadow = true;
+        sphere.receiveShadow = true;
+        sphere.userData = { name: 'Sphere', originalScale: 1, shouldRotate: true };
+        scene.add(sphere);
+        interactiveObjects.push(sphere);
+
+        // --- CONE ---
+        const cone = new THREE.Mesh(
+            new THREE.ConeGeometry(1, 2, 8),
+            new THREE.MeshStandardMaterial({ color: 0xFFD93D, roughness: 0.5, metalness: 0.3 })
+        );
+        cone.position.set(3, 1, 0);
+        cone.castShadow = true;
+        cone.receiveShadow = true;
+        cone.userData = { name: 'Cone', originalScale: 1, shouldRotate: true };
+        scene.add(cone);
+        interactiveObjects.push(cone);
+
+        // --- TORUS ---
+        const torus = new THREE.Mesh(
+            new THREE.TorusGeometry(0.8, 0.3, 16, 100),
+            new THREE.MeshStandardMaterial({ color: 0xA855F7, roughness: 0.2, metalness: 0.8 })
+        );
+        torus.position.set(0, 1, 4);
+        torus.castShadow = true;
+        torus.receiveShadow = true;
+        torus.userData = { name: 'Torus', originalScale: 1, shouldRotate: true };
+        scene.add(torus);
+        interactiveObjects.push(torus);
+
+        // ============================================
+        // HELPER: setEmissive works on Mesh AND Group
+        // ============================================
+        /*
+         * BUG 4 FIXED: A GLB loaded with GLTFLoader returns a Group, not a
+         * single Mesh.  Calling group.material.emissive crashes because Groups
+         * have no .material.  We traverse to find child Meshes instead.
+         */
+        function setEmissive(obj, hex) {
+            if (obj.isMesh && obj.material && obj.material.emissive) {
+                obj.material.emissive.setHex(hex);
+            } else {
+                obj.traverse(child => {
+                    if (child.isMesh && child.material && child.material.emissive) {
+                        child.material.emissive.setHex(hex);
+                    }
+                });
+            }
+        }
+
+        // ============================================
+        // SECTION 4b: LOAD GLB MODEL (mesa)
+        // ============================================
+
+        const loader = new GLTFLoader();
+        loader.load(
+            './mesa_bonita.glb',
+            function (gltf) {
+                const mesa = gltf.scene;
+                mesa.position.set(4, 0, 0);
+                mesa.scale.set(1, 1, 1);
+                // shouldRotate: false → the table won't spin in the animation loop
+                mesa.userData = { name: 'Mesa', originalScale: 1, shouldRotate: false };
+
+                mesa.traverse((child) => {
+                    /*
+                     * Tag every child with a reference back to the root Group.
+                     * BUG 5 FIX (part 2): After enabling recursive raycasting,
+                     * clicks return the child Mesh, not the Group.  We use
+                     * userData.interactiveRoot to resolve back to the Group.
+                     */
+                    child.userData.interactiveRoot = mesa;
+
+                    if (child.isMesh) {
+                        child.castShadow = true;
+                        child.receiveShadow = true;
+                        // Build BVH — constructor signature is fine as-is
+                        child.geometry.boundsTree = new MeshBVH(child.geometry);
+                    }
+                });
+
+                scene.add(mesa);
+                interactiveObjects.push(mesa);
+            },
+            (xhr) => console.log((xhr.loaded / xhr.total * 100).toFixed(1) + '% loaded'),
+            (error) => console.error('Erro ao carregar mesa:', error)
+        );
+
+        // ============================================
+        // SECTION 5: HAND VISUALIZATION
+        // ============================================
+
+        // Camera must be in the scene when it has children
+        const handGroup = new THREE.Group();
+        scene.add(camera);
+        camera.add(handGroup);
+        handGroup.position.set(0, -0.2, -1);
+        handGroup.scale.set(0.4, 0.4, 0.4);
+
+        const boneMaterial  = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        const jointMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+
+        const CYLINDER_RADIUS = 0.045;
+        const JOINT_RADIUS    = 0.090;
+
+        function createJoint(position) {
+            const mesh = new THREE.Mesh(
+                new THREE.SphereGeometry(JOINT_RADIUS, 16, 16),
+                jointMaterial
+            );
+            mesh.position.copy(position);
+            return mesh;
+        }
+
+        function createBone(startPos, endPos) {
+            const distance = startPos.distanceTo(endPos);
+            const mesh = new THREE.Mesh(
+                new THREE.CylinderGeometry(CYLINDER_RADIUS, CYLINDER_RADIUS, distance, 8),
+                boneMaterial
+            );
+            const midpoint = new THREE.Vector3().addVectors(startPos, endPos).multiplyScalar(0.5);
+            mesh.position.copy(midpoint);
+            mesh.lookAt(endPos);
+            mesh.rotateX(Math.PI / 2);
+            return mesh;
+        }
+
+        // MediaPipe landmark connection pairs
+        const landmarkIndices = [
+            [0,1],[1,2],[2,3],[3,4],           // Thumb
+            [0,5],[5,6],[6,7],[7,8],           // Index
+            [0,9],[9,10],[10,11],[11,12],       // Middle
+            [0,13],[13,14],[14,15],[15,16],     // Ring
+            [0,17],[17,18],[18,19],[19,20]      // Pinky
+        ];
+
+        const jointsMeshes = [];
+        const bonesMeshes  = [];
+
+        for (let i = 0; i < 21; i++) {
+            const j = createJoint(new THREE.Vector3());
+            jointsMeshes.push(j);
+            handGroup.add(j);
+        }
+        for (let i = 0; i < landmarkIndices.length; i++) {
+            const b = createBone(new THREE.Vector3(), new THREE.Vector3());
+            bonesMeshes.push(b);
+            handGroup.add(b);
+        }
+
+        // Debug sphere that shows the pinch midpoint in world space
+        const debugPinchMesh = new THREE.Mesh(
+            new THREE.SphereGeometry(0.05, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0xff00ff, wireframe: true })
+        );
+        scene.add(debugPinchMesh);
+
+        // ============================================
+        // SECTION 6b: FPS CAMERA STATE
+        // ============================================
+
+        // yaw=0 means Three.js default look direction (-Z), which faces the scene
+        let cameraYaw   = 0;
+        let cameraPitch = -0.12;  // slightly looking down from eye level
+        let smoothHandX = 0;
+        let smoothHandY = 0;
+        let shiftHeld   = false;
+
+        // ── Tuning knobs ──────────────────────────────────────────────────
+        // Dead zone: fraction of the -1..+1 normalized range at the center
+        // where the hand causes NO camera movement (the "leeway" area).
+        const DEAD_ZONE    = 0.22;
+        // Sensitivity outside the dead zone (radians per frame at max displacement)
+        const SENS_NORMAL  = 0.035;  // fluid / default
+        const SENS_PRECISE = 0.008;  // Shift held: slow & precise
+        // Pitch moves at 60% the rate of yaw (feels more natural)
+        const PITCH_SCALE  = 0.60;
+        // Smoothing: lower = smoother camera but more latency vs tracking noise
+        const SMOOTH_ALPHA = 0.12;
+        // ─────────────────────────────────────────────────────────────────
+
+        // Pre-allocated to avoid GC pressure each frame
+        const _qYaw  = new THREE.Quaternion();
+        const _qPitch= new THREE.Quaternion();
+        const _axisY = new THREE.Vector3(0, 1, 0);
+        const _axisX = new THREE.Vector3(1, 0, 0);
+
+        function applyDeadZone(v) {
+            const s = Math.sign(v), m = Math.abs(v);
+            // Below threshold → zero; above → linearly scaled to 0..1
+            return m < DEAD_ZONE ? 0 : s * (m - DEAD_ZONE) / (1 - DEAD_ZONE);
+        }
+
+        function applyFPSCamera() {
+            _qYaw.setFromAxisAngle(_axisY,  cameraYaw);
+            _qPitch.setFromAxisAngle(_axisX, cameraPitch);
+            camera.quaternion.copy(_qYaw).multiply(_qPitch);
+        }
+
+        // ── HUD helpers ───────────────────────────────────────────────────
+        const handDot = document.getElementById('hand-dot');
+        const handHud = document.getElementById('hand-hud');
+
+        function updateHUD() {
+            const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+            // Map -1..+1 to 0..100%
+            handDot.style.left = `${clamp((smoothHandX + 1) * 50, 2, 98)}%`;
+            handDot.style.top  = `${clamp((-smoothHandY + 1) * 50, 2, 98)}%`;
+            const inDZ  = Math.hypot(smoothHandX, smoothHandY) < DEAD_ZONE;
+            const color = inDZ ? '#888' : (shiftHeld ? '#00bfff' : '#00ff88');
+            handDot.style.background = color;
+            handDot.style.boxShadow  = inDZ ? 'none' : `0 0 7px ${color}`;
+            handHud.style.borderColor = shiftHeld ? 'rgba(0,191,255,0.55)' : 'rgba(255,255,255,0.35)';
+        }
+
+        // ============================================
+        // SECTION 6: GRAB INTERACTION STATE
+        // ============================================
+
+        let isPinching    = false;
+        let grabbedObject = null;
+        const grabOffset  = new THREE.Vector3(); // pinch-to-center offset, set on grab start
+        const PINCH_THRESHOLD = 0.18;
+
+        // ============================================
+        // COLLISION DETECTION (BVH + Box3 fallback)
+        // ============================================
+        /*
+         * BUG 2 FIXED: three-mesh-bvh has no `nearestPoint()` method.
+         *   The correct method is `closestPointToPoint(localPoint, target)`.
+         *   It returns null when nothing is found, or fills `target` with
+         *   { point, distance, faceIndex, face }.
+         *
+         * BUG 3 FIXED: The point must be in the CHILD MESH's local space,
+         *   not the parent Group's space.  Use child.worldToLocal() and
+         *   clone() freshly for each child so the original is not mutated.
+         */
+        function checkCollision(object, pinchWorldPoint, tolerance = 0.15) {
+            // Check whether any child Mesh has a BVH built
+            let hasBVH = false;
+            object.traverse((child) => {
+                if (child.isMesh && child.geometry.boundsTree) hasBVH = true;
+            });
+
+            if (hasBVH) {
+                let closestDistance = Infinity;
+
+                object.traverse((child) => {
+                    if (child.isMesh && child.geometry.boundsTree) {
+                        // Fresh clone for each child — don't reuse a mutated vector
+                        const localPoint = pinchWorldPoint.clone();
+                        child.worldToLocal(localPoint); // ← BUG 3 FIX: child, not object
+
+                        // ← BUG 2 FIX: correct API with a target object
+                        const target = {};
+                        const hit = child.geometry.boundsTree.closestPointToPoint(localPoint, target);
+
+                        if (hit !== null && target.distance < closestDistance) {
+                            closestDistance = target.distance;
+                        }
+                    }
+                });
+
+                return closestDistance <= tolerance;
+            }
+
+            // Fallback: axis-aligned bounding box (good enough for primitive shapes)
+            const box = new THREE.Box3().setFromObject(object);
+            box.expandByScalar(tolerance);
+            return box.containsPoint(pinchWorldPoint);
+        }
+
+        // ============================================
+        // SECTION 7: MEDIAPIPE HANDS
+        // ============================================
+
+        const videoElement = document.getElementsByClassName('input_video')[0];
+        const loadingDiv   = document.getElementById('loading');
+        const debugPanel   = document.getElementById('debug-panel');
+
+        const WORLD_SCALE = 1.2;
+
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        function onResults(results) {
+            loadingDiv.style.display = 'none';
+            let debugText = '';
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+
+                // ── HAND → FPS CAMERA ────────────────────────────────────────
+                // MediaPipe lm.x: 0=screen-left, 1=screen-right (mirrored feed).
+                // User moves right → lm.x decreases → negate so right=positive rotation.
+                const wrist = landmarks[0];
+                const rawX  = -(wrist.x - 0.5) * 2;  // -1..+1  +ve = user's right
+                const rawY  = -(wrist.y - 0.5) * 2;  // -1..+1  +ve = up
+
+                // Exponential smoothing — suppresses tracking jitter
+                smoothHandX += (rawX - smoothHandX) * SMOOTH_ALPHA;
+                smoothHandY += (rawY - smoothHandY) * SMOOTH_ALPHA;
+
+                const sens   = shiftHeld ? SENS_PRECISE : SENS_NORMAL;
+                cameraYaw   -= applyDeadZone(smoothHandX) * sens;
+                cameraPitch += applyDeadZone(smoothHandY) * sens * PITCH_SCALE;
+                cameraPitch  = Math.max(-Math.PI * 0.44, Math.min(Math.PI * 0.44, cameraPitch));
+                updateHUD();
+                // ─────────────────────────────────────────────────────────────
+
+                // Update joint positions
+                landmarks.forEach((lm, i) => {
+                    jointsMeshes[i].position.set(
+                        (0.5 - lm.x) * WORLD_SCALE,
+                        (0.5 - lm.y) * WORLD_SCALE,
+                        lm.z * WORLD_SCALE
+                    );
+                });
+
+                // Rebuild bone geometry each frame
+                landmarkIndices.forEach(([si, ei], i) => {
+                    const startPos = jointsMeshes[si].position;
+                    const endPos   = jointsMeshes[ei].position;
+                    const dist     = startPos.distanceTo(endPos);
+                    bonesMeshes[i].geometry.dispose();
+                    bonesMeshes[i].geometry = new THREE.CylinderGeometry(
+                        CYLINDER_RADIUS, CYLINDER_RADIUS, dist, 8
+                    );
+                    const mid = new THREE.Vector3().addVectors(startPos, endPos).multiplyScalar(0.5);
+                    bonesMeshes[i].position.copy(mid);
+                    bonesMeshes[i].lookAt(endPos);
+                    bonesMeshes[i].rotateX(Math.PI / 2);
+                });
+
+                // Compute pinch midpoint in world space
+                const thumbTip = jointsMeshes[4].position;
+                const indexTip = jointsMeshes[8].position;
+                const pinchDistance = thumbTip.distanceTo(indexTip);
+
+                const pinchWorldPosition = new THREE.Vector3()
+                    .addVectors(thumbTip, indexTip)
+                    .multiplyScalar(0.5);
+                handGroup.localToWorld(pinchWorldPosition);
+
+                debugPinchMesh.position.copy(pinchWorldPosition);
+
+                // --- Grab logic ---
+                if (pinchDistance < PINCH_THRESHOLD) {
+                    if (!isPinching) {
+                        isPinching = true;
+
+                        interactiveObjects.forEach(obj => {
+                            const dist = obj.position.distanceTo(pinchWorldPosition);
+                            debugText += `- ${obj.userData.name}: ${dist.toFixed(2)}m<br>`;
+
+                            if (!grabbedObject && checkCollision(obj, pinchWorldPosition, 0.3)) {
+                                grabbedObject = obj;
+                                grabOffset.subVectors(obj.position, pinchWorldPosition);
+                                setEmissive(grabbedObject, 0x555555);
+                                console.log(`Agarrado: ${obj.userData.name}`);
+                            }
+                        });
+                    } else {
+                        interactiveObjects.forEach(obj => {
+                            const dist = obj.position.distanceTo(pinchWorldPosition);
+                            debugText += `- ${obj.userData.name}: ${dist.toFixed(2)}m<br>`;
+                        });
+                    }
+                } else {
+                    if (isPinching && grabbedObject) {
+                        setEmissive(grabbedObject, 0x000000);
+                        grabbedObject = null;
+                    }
+                    isPinching = false;
+
+                    interactiveObjects.forEach(obj => {
+                        const dist = obj.position.distanceTo(pinchWorldPosition);
+                        debugText += `- ${obj.userData.name}: ${dist.toFixed(2)}m<br>`;
+                    });
+                }
+
+                if (grabbedObject) {
+                    grabbedObject.position.copy(pinchWorldPosition).add(grabOffset);
+                }
+
+                const modeStr = shiftHeld
+                    ? '<span style="color:#00bfff">🎯 PRECISO (Shift)</span>'
+                    : '<span style="color:#ffff00">⚡ NORMAL</span>';
+
+                debugPanel.innerHTML =
+                    `<b>Modo:</b> ${modeStr}<br>` +
+                    `<b>Mão:</b> X:${smoothHandX.toFixed(2)} Y:${smoothHandY.toFixed(2)}<br>` +
+                    `<b>Input:</b> X:${applyDeadZone(smoothHandX).toFixed(2)} Y:${applyDeadZone(smoothHandY).toFixed(2)}<br>` +
+                    `<b>Yaw:</b> ${(cameraYaw*180/Math.PI).toFixed(1)}° <b>Pitch:</b> ${(cameraPitch*180/Math.PI).toFixed(1)}°<br><hr>` +
+                    `<b>Pinch Dist:</b> ${pinchDistance.toFixed(3)}<br>` +
+                    `<b>Estado:</b> ${isPinching ? '<span style="color:red">SEGURANDO</span>' : 'LIVRE'}<br>` +
+                    `<b>Objeto:</b> ${grabbedObject ? grabbedObject.userData.name : 'Nenhum'}<br><hr>` +
+                    debugText;
+
+            } else {
+                debugPanel.innerHTML = '🖐 Aguardando mão...';
+            }
+        }
+
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({ image: videoElement }); },
+            width: 640,
+            height: 480
+        });
+        cameraUtils.start();
+
+        // ============================================
+        // SECTION 8: FPS CAMERA INPUT (mouse fallback)
+        // ============================================
+
+        const transformControls = new TransformControls(camera, renderer.domElement);
+        scene.add(transformControls);
+
+        // Mouse wheel → zoom (move along look direction)
+        renderer.domElement.addEventListener('wheel', (e) => {
+            const dir = new THREE.Vector3();
+            camera.getWorldDirection(dir);
+            camera.position.addScaledVector(dir, -e.deltaY * 0.015);
+        }, { passive: true });
+
+        // Right-click drag → FPS mouse look (mirrors hand behaviour)
+        let isRightDragging = false, lastMouseX = 0, lastMouseY = 0;
+        renderer.domElement.addEventListener('mousedown', (e) => {
+            if (e.button === 2) {
+                isRightDragging = true;
+                lastMouseX = e.clientX; lastMouseY = e.clientY;
+            }
+        });
+        window.addEventListener('mouseup', (e) => { if (e.button === 2) isRightDragging = false; });
+        window.addEventListener('mousemove', (e) => {
+            if (!isRightDragging) return;
+            const mouseSens = shiftHeld ? 0.001 : 0.003;
+            cameraYaw   -= (e.clientX - lastMouseX) * mouseSens;
+            cameraPitch -= (e.clientY - lastMouseY) * mouseSens;
+            cameraPitch  = Math.max(-Math.PI * 0.44, Math.min(Math.PI * 0.44, cameraPitch));
+            lastMouseX = e.clientX; lastMouseY = e.clientY;
+        });
+        renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        const raycaster = new THREE.Raycaster();
+        const mouse     = new THREE.Vector2();
+        let selectedObject = null;
+
+        // ============================================
+        // SECTION 8.5: HUD TOGGLE (clean view mode)
+        // ============================================
+
+        const hudToggleBtn = document.getElementById('hud-toggle-btn');
+
+        function toggleHUD() {
+            const hidden = document.body.classList.toggle('hud-hidden');
+            hudToggleBtn.textContent = hidden ? '🙈' : '🐵';
+        }
+
+        hudToggleBtn.addEventListener('click', toggleHUD);
+
+        window.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 'h') toggleHUD();
+        });
+
+        // ============================================
+        // SECTION 9: EVENT HANDLERS
+        // ============================================
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        renderer.domElement.addEventListener('click', (event) => {
+            mouse.x =  (event.clientX / window.innerWidth)  * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+
+            /*
+             * BUG 5 FIXED: Pass `true` (recursive) so raycasting descends
+             * into GLB Group children.  Then resolve the clicked child back
+             * to its root interactive object via userData.interactiveRoot.
+             */
+            const intersects = raycaster.intersectObjects(interactiveObjects, true);
+
+            if (intersects.length > 0) {
+                const hit    = intersects[0].object;
+                const object = hit.userData.interactiveRoot || hit; // resolve GLB root
+
+                if (selectedObject === object) {
+                    transformControls.detach();
+                    setEmissive(object, 0x000000);
+                    selectedObject = null;
+                } else {
+                    if (selectedObject) setEmissive(selectedObject, 0x000000);
+                    selectedObject = object;
+                    transformControls.attach(object);
+                    setEmissive(object, 0x333333);
+                }
+            } else {
+                if (selectedObject) setEmissive(selectedObject, 0x000000);
+                transformControls.detach();
+                selectedObject = null;
+            }
+        });
+
+        window.addEventListener('keydown', (event) => {
+            if (!selectedObject) return;
+            switch (event.key.toLowerCase()) {
+                case 'e':
+                    selectedObject.scale.multiplyScalar(1.1);
+                    break;
+                case 'r':
+                    if (selectedObject.scale.x > 0.3)
+                        selectedObject.scale.multiplyScalar(0.9);
+                    break;
+            }
+        });
+
+        // Shift key tracking (precision mode for hand + slows WASD)
+        window.addEventListener('keydown', (e) => { if (e.key === 'Shift') shiftHeld = true; });
+        window.addEventListener('keyup',   (e) => { if (e.key === 'Shift') shiftHeld = false; });
+
+        // WASD movement
+        const keys = { w: false, a: false, s: false, d: false };
+        window.addEventListener('keydown', (e) => { if (e.key.toLowerCase() in keys) keys[e.key.toLowerCase()] = true; });
+        window.addEventListener('keyup',   (e) => { if (e.key.toLowerCase() in keys) keys[e.key.toLowerCase()] = false; });
+
+        function updateCameraMovement() {
+            // Shift also slows walking — consistent with precision-mode philosophy
+            const speed = shiftHeld ? 0.025 : 0.07;
+            const direction = new THREE.Vector3();
+            camera.getWorldDirection(direction);
+            const right = new THREE.Vector3().crossVectors(camera.up, direction).normalize();
+
+            if (keys.w) camera.position.addScaledVector(direction,  speed);
+            if (keys.s) camera.position.addScaledVector(direction, -speed);
+            if (keys.a) camera.position.addScaledVector(right,      speed);
+            if (keys.d) camera.position.addScaledVector(right,     -speed);
+        }
+
+        // ============================================
+        // SECTION 10: ANIMATION LOOP
+        // ============================================
+
+        function animate() {
+            requestAnimationFrame(animate);
+            updateCameraMovement();
+            applyFPSCamera(); // Hand/mouse-driven FPS rotation applied every frame
+
+            // Only rotate objects that have shouldRotate: true (excludes GLB models)
+            interactiveObjects.forEach((obj, i) => {
+                if (obj.userData.shouldRotate) {
+                    obj.rotation.y += 0.005 * (i % 2 === 0 ? 1 : -1);
+                }
+            });
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
